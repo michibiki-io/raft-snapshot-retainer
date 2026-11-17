@@ -32,3 +32,12 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Generated local build/test artifacts
+/dist/
+/.tmp/
+/test/e2e/.env
+/test/e2e/.state/
+/test/e2e/results/
+__pycache__/
+.pytest_cache/

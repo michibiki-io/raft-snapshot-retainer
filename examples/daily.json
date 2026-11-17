@@ -1,0 +1,8 @@
+{
+  "bucket": "example-backups",
+  "prefix": "openbao",
+  "region": "us-east-1",
+  "policy": {"hourly": 0, "daily": 7, "weekly": 0, "monthly": 0, "minimum": 1},
+  "timeout": "5m",
+  "format": "json"
+}

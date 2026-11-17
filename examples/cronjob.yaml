@@ -1,0 +1,42 @@
+# Illustrative only. An on-success producer workflow must replace the exact key;
+# never enable an independent schedule with a stale literal confirmation key.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: raft-snapshot-retainer-example
+spec:
+  suspend: true
+  schedule: "15 0 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          containers:
+            - name: retainer
+              # Resolve a published digest after consumer acceptance tests.
+              image: ghcr.io/michibiki-io/raft-snapshot-retainer:0.1.0
+              args: ["--apply", "--successful-upload-key", "openbao/bao_2026-11-18-0000.snapshot"]
+              env:
+                - {name: RSR_BUCKET, value: example-backups}
+                - {name: RSR_PREFIX, value: openbao}
+                - {name: RSR_REGION, value: us-east-1}
+                - {name: RSR_DAILY, value: "7"}
+                - {name: RSR_TIMEOUT, value: "5m"}
+                - {name: AWS_EC2_METADATA_DISABLED, value: "true"}
+              envFrom:
+                - secretRef: {name: resolved-s3-connection}
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+              resources:
+                requests: {cpu: 50m, memory: 32Mi}
+                limits: {cpu: "1", memory: 256Mi}
