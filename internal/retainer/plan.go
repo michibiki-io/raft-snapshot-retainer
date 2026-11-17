@@ -33,7 +33,7 @@ func NormalizePrefix(s string) (string, error) {
 	}
 	for _, p := range strings.Split(s, "/") {
 		if p == "" || p == "." || p == ".." {
-			return "", fmt.Errorf("prefix must not contain dot segments")
+			return "", fmt.Errorf("prefix must not contain empty or dot segments")
 		}
 	}
 	return s + "/", nil
