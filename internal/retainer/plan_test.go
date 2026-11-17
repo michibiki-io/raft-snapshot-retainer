@@ -84,7 +84,7 @@ func TestNamesAndSafety(t *testing.T) {
 	if len(p.Problems) != 1 {
 		t.Fatal(p)
 	}
-	for _, s := range []string{"", "/", "//", "/a", "a//b", "a/../b", "a/./b", " a"} {
+	for _, s := range []string{"", "/", "//", "/a", "a//b", "a//", "a/../b", "a/./b", " a"} {
 		if _, e := NormalizePrefix(s); e == nil {
 			t.Errorf("accepted %q", s)
 		}

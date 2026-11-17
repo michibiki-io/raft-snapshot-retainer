@@ -215,3 +215,43 @@ func TestNoWritesDryRun(t *testing.T) {
 
 // Compile-time checks keep SDK interface signatures in sync.
 var _ Client = (*s3.Client)(nil)
+
+func TestDeleteResponseHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		wantErr bool
+	}{
+		{"no version", nil, false},
+		{"null version", map[string]string{"x-amz-version-id": "null"}, false},
+		{"empty version", map[string]string{"x-amz-version-id": ""}, false},
+		{"real version", map[string]string{"x-amz-version-id": "version-123"}, true},
+		{"delete marker", map[string]string{"x-amz-delete-marker": "true", "x-amz-version-id": "null"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			envCreds(t)
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != "DELETE" {
+					t.Errorf("unexpected method %s", r.Method)
+				}
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(204)
+			}))
+			defer srv.Close()
+			store, e := New(context.Background(), testConfig(srv.URL))
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = store.Delete(context.Background(), "openbao/bao_2025-01-01-0000.snapshot"); (e != nil) != tc.wantErr {
+				t.Fatalf("error=%v wantErr=%v", e, tc.wantErr)
+			}
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}

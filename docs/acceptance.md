@@ -19,8 +19,8 @@ recorded on the PR, rather than asserting that an earlier source revision passed
 | R4 | AWS SDK v2 S3 adapter; paginated HTTP tests, local custom endpoint/path-style MinIO, mounted/environment credentials, untrusted TLS rejection and trusted custom CA test |
 | R5 | `Run` read-only preflight and HEAD/pin verification; fake/HTTP/MinIO missing, nested, empty, future, mismatched and unreadable confirmation cases with zero deletes |
 | R6 | Dry-run read-only request test; oldest-first delete, per-object failure, partial progress and cancellation tests; MinIO rerun/no-op |
-| R7 | SDK versioning/Object Lock checks; Enabled, Suspended, unknown enum, configured/empty/denied/unsupported lock response tests; only explicit not-configured code accepted |
-| R8 | Versioned JSON and text output, plan counts/reasons and fixed non-secret failure codes; command exit/secret suppression tests and documented statuses |
+| R7 | SDK versioning/Object Lock checks; Enabled, Suspended, unknown enum, configured/empty/denied/unsupported lock response tests; only explicit not-configured code accepted; DELETE header tests distinguish empty/null IDs from real IDs/delete markers |
+| R8 | Versioned JSON and text output, plan counts/reasons and fixed non-secret failure codes; command exit/secret suppression, file/env/flag precedence and JSON/text success/error tests; documented statuses |
 | R9 | `go test -race ./...`, fake clock/storage and hermetic HTTP/TLS endpoints; no production secrets |
 | R10 | `test/e2e`: checksum-pinned MinIO container, actual shipped CLI image, 8 pytest cases, isolated disposable buckets and generated credentials |
 | R11 | Pinned Go 1.27.4/dependencies, trixie build/runtime, UID 65532, Test workflow, amd64/arm64 cross-build, multi-arch release workflow and binary assets |
@@ -38,6 +38,11 @@ Local verification during initial implementation:
 - Unrun: AWS/Wasabi/OCI/R2/B2/C2/Spaces or other live-provider acceptance, arm64
   native runtime, release/GHCR publication and a real OpenBao snapshot restore.
   No production bucket, Kubernetes cluster or neighboring consumer was modified.
+
+Claude round-1 follow-up used focused tests for trailing empty-prefix rejection,
+file/env/flag precedence, CLI JSON/text outcomes and DELETE version headers, plus
+non-mutating format/vet and workflow actionlint. No full local e2e rerun was needed
+for this fix round; exact-head CI owns the complete suite.
 
 The final PR head must pass the `Test` workflow and the independent review loop
 before completion. A PR does not execute merged-PR release publication. Operators

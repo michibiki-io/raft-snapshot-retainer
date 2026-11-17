@@ -159,7 +159,8 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	if e != nil {
 		return e
 	}
-	if aws.ToBool(out.DeleteMarker) || out.VersionId != nil {
+	version := aws.ToString(out.VersionId)
+	if aws.ToBool(out.DeleteMarker) || (version != "" && version != "null") {
 		return fmt.Errorf("unexpected versioned deletion")
 	}
 	return nil

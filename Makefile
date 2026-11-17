@@ -1,9 +1,10 @@
 GO ?= go
+GOFMT ?= gofmt
 IMAGE ?= raft-snapshot-retainer:e2e
 VERSION ?= dev
 .PHONY: test check build image e2e-compose e2e-compose-down
 check:
-	test -z "$$($(GO) fmt ./...)"
+	test -z "$$($(GOFMT) -l cmd internal)"
 	$(GO) vet ./...
 test:
 	$(GO) test -race ./...

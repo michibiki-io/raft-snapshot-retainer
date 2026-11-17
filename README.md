@@ -52,7 +52,7 @@ nested policy fields), unknown `RSR_*` variables and positional arguments fail.
 | `policy.monthly` | `RSR_MONTHLY` | Occupied calendar months, default 0 |
 | `policy.minimum` | `RSR_MINIMUM` | Positive minimum newest-object floor, default 1 |
 | `successful_upload_key` | `RSR_SUCCESSFUL_UPLOAD_KEY` | Exact completed key, required for apply |
-| `ca_file` | `RSR_CA_FILE` | PEM custom CA bundle path; TLS verification remains enabled |
+| `ca_file` | `RSR_CA_FILE` | PEM bundle path replacing system CA trust; TLS verification remains enabled |
 | `access_key_file` | `RSR_ACCESS_KEY_FILE` | Mounted access key path, paired with secret key file |
 | `secret_key_file` | `RSR_SECRET_KEY_FILE` | Mounted secret key path |
 | `session_token_file` | `RSR_SESSION_TOKEN_FILE` | Optional mounted token, requires both key files |
@@ -113,7 +113,10 @@ reports the failed key and confirmed earlier deletions, and exits nonzero. There
 is no rollback. Timeouts/SIGINT/SIGTERM propagate through SDK calls; at most three
 SDK attempts per operation use standard bounded retries under the whole-run
 timeout. If a response is lost after a server-side deletion, the failed object's
-outcome may be uncertain; `deleted` counts only acknowledged successes. Rerun
+outcome may be uncertain; `deleted` counts only acknowledged successes. An absent,
+empty or literal `null` version-id header is accepted after unversioned preflight;
+a real version ID or delete-marker response stops as an unexpected versioned
+outcome (the server may already have changed the object). Rerun
 re-lists and recalculates from current storage without local persistent state.
 
 ### Storage and credentials
@@ -138,6 +141,11 @@ Credential precedence:
    refresh behavior. A selected provider failure is surfaced, not replaced with a
    second provider by this application. Disable metadata probing with
    `AWS_EC2_METADATA_DISABLED=true` where instance roles are unwanted.
+
+When `ca_file` is specified, the SDK trusts **only that bundle**, replacing system
+CA trust for the shared SDK HTTP client, including STS/SSO credential endpoints.
+If both private S3 and public credential endpoints are needed, supply a combined
+bundle containing the private CA and the required system/public CA certificates.
 
 `AWS_PROFILE`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE` and workload identity
 environment follow SDK conventions. Do not enable external SDK/HTTP debug tracing
@@ -292,6 +300,8 @@ dry-run は保護状態の注意を表示して計画を出せますが、apply 
 endpoint・region・bucket・prefix は consumer が解決した値を渡します。provider resolver は実装しません。
 HTTPS、path-style/virtual-hosted、SDK 認証、マウントした認証ファイル、session token、独自 CA に対応します。
 TLS 検証は無効化できず、HTTP は明示指定した loopback のローカルテストだけに限ります。
+独自 CA bundle を指定するとシステム CA の信頼を置き換え、その bundle だけを信頼します。
+この設定は STS/SSO などの認証用接続にも適用されるため、公開 endpoint も使う場合は必要な公開 CA を bundle に含めてください。
 認証の優先順はマウントファイル、完全な環境変数の組、SDK 既定 chain です。
 選択した認証が不完全・失敗なら別の認証へ切り替えません。値を引数・ログ・image に含めないでください。
 必要な IAM 権限は英語の表を参照してください。実測済み provider は使い捨て MinIO のみです。

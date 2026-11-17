@@ -32,7 +32,7 @@ func NormalizePrefix(s string) (string, error) {
 		return "", fmt.Errorf("prefix must be a non-root relative directory")
 	}
 	for _, p := range strings.Split(s, "/") {
-		if p == "." || p == ".." {
+		if p == "" || p == "." || p == ".." {
 			return "", fmt.Errorf("prefix must not contain dot segments")
 		}
 	}

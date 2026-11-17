@@ -65,3 +65,20 @@ func TestStrictLoad(t *testing.T) {
 		t.Fatal(c)
 	}
 }
+
+func TestFileEnvironmentPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if e := os.WriteFile(path, []byte(`{"bucket":"file-bucket","prefix":"file-prefix","region":"file-region","policy":{"daily":7,"minimum":2},"successful_upload_key":"file-key"}`), 0600); e != nil {
+		t.Fatal(e)
+	}
+	c, e := Load(path, []string{"RSR_BUCKET=env-bucket", "RSR_DAILY=3", "RSR_SUCCESSFUL_UPLOAD_KEY=env-key"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Validate(); e != nil {
+		t.Fatal(e)
+	}
+	if c.Bucket != "env-bucket" || c.Prefix != "file-prefix/" || c.Region != "file-region" || c.Policy.Daily != 3 || c.Policy.Minimum != 2 || c.SuccessfulUploadKey != "env-key" {
+		t.Fatalf("incorrect precedence: %+v", c)
+	}
+}
