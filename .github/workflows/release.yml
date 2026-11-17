@@ -162,8 +162,8 @@ jobs:
           annotations: ${{ steps.docker_meta.outputs.annotations }}
           build-args: |
             VERSION=${{ needs.prepare.outputs.git_tag }}
+          # This post-merge event has read-only cache access; cold builds are valid.
           cache-from: type=gha
-          cache-to: type=gha,mode=max
           provenance: true
           sbom: true
 
@@ -181,8 +181,8 @@ jobs:
           annotations: ${{ steps.docker_meta.outputs.annotations }}
           build-args: |
             VERSION=${{ needs.prepare.outputs.git_tag }}
+          # This post-merge event has read-only cache access; cold builds are valid.
           cache-from: type=gha
-          cache-to: type=gha,mode=max
           provenance: true
           sbom: true
 
@@ -232,8 +232,8 @@ jobs:
           annotations: ${{ steps.docker_meta.outputs.annotations }}
           build-args: |
             VERSION=${{ needs.prepare.outputs.git_tag }}
+          # This post-merge event has read-only cache access; cold builds are valid.
           cache-from: type=gha
-          cache-to: type=gha,mode=max
           provenance: true
           sbom: true
 

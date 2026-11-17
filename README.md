@@ -215,6 +215,7 @@ make build VERSION=v0.1.0       # Linux host binary in dist/
 make image VERSION=v0.1.0       # non-root trixie container
 python3 -m venv .tmp/e2e-venv
 .tmp/e2e-venv/bin/pip install -r test/e2e/requirements.txt
+.tmp/e2e-venv/bin/python -m unittest discover -s scripts/release -v
 .tmp/e2e-venv/bin/python test/e2e/scripts/run.py
 make e2e-compose-down           # cleanup a retained environment
 ```
@@ -243,7 +244,9 @@ Command environment overrides `E2E_ENV_FILE` (default `test/e2e/.env`), then def
 results go to `test/e2e/results/`; cleanup runs by default. `make e2e-compose` uses
 your Python interpreter, so activate the venv first or use its Python explicitly.
 
-The `Test` workflow verifies formatting/vet/unit/race, amd64/arm64 cross-builds,
+The `Test` workflow runs only on pull-request opened/synchronize/reopened events,
+including pushes to an open PR. It does not run again on main pushes or merges.
+It verifies formatting/vet/unit/race, amd64/arm64 cross-builds,
 release helpers and amd64 MinIO/container integration. `ACTIONS_TEST_RUNNER` selects
 an **amd64 Linux** runner with Docker/Compose; unset falls back to `ubuntu-latest`.
 All JavaScript Actions use Node 24 runtimes. No Node application/plugin is added.
@@ -257,6 +260,28 @@ semver from individual Conventional Commit messages (never PR titles), initially
 for both platforms, otherwise native amd64/arm64 jobs create a shared manifest.
 Release assets `release-images.json` and `approved-runtime-images.json` record the
 published digest and carry forward prior approved pins without repository commits.
+Release builds retain best-effort `cache-from: type=gha` but never export GHA
+cache: the post-merge `pull_request_target` event has read-only cache access.
+PR validation still imports/exports its own cache. With main-push tests removed,
+no workflow supplies new main-scope entries; existing entries may expire and
+Release must tolerate cold builds. PR merge-ref caches are not shared with
+Release. This follows [Docker's cache-write guidance](https://docs.docker.com/build/ci/github-actions/cache/#cache-write-restrictions), without broader permissions or ignored export errors.
+
+An interrupted release can leave a reachable git tag without a published GitHub
+Release (as happened for `v0.1.0`). Version allocation still uses reachable tags:
+a subsequent patch becomes `v0.1.1`, preserving the existing tag. Approved-image
+carry-forward separately searches reachable stable tags newest-first, bounded
+by the previous tag, for a published stable Release. Only a Release metadata
+HTTP 404 (or an explicitly draft/prerelease record) is skipped. If none exists,
+the approved set starts empty. Once a published predecessor exists, its
+`approved-runtime-images.json` asset is mandatory. Missing/malformed assets,
+401/403/429/server/network errors stop publication instead of discarding pins.
+The manifest version must match its tag, image IDs must be unique, and digest
+refs must match their image/digest; unrelated valid image entries are preserved.
+An old failed workflow uses its original code; rerunning it does not apply this
+fix. Merge the reviewed fix normally and let its new release run handle the
+orphan tag; do not delete/repoint tags or publish by hand as part of PR validation.
+
 Binary/image `--version` is the release tag. Publication is not exercised by a PR;
 local image verification does not claim a registry release. Pin consumers to the
 published digest after their acceptance tests.
@@ -325,6 +350,18 @@ KMS 操作、snapshot 作成・復元、OpenBao/ESO 初期化、SOPS/age 管理�
 上記の再現コマンドで format/vet/unit/race、コンテナ、MinIO 結合テストを検証できます。
 Go 1.27.4 と依存を固定し、build/runtime とも trixie、UID/GID 65532 で実行します。
 Linux amd64/arm64 のバイナリ・image をリリース対象とし、PR の実行検証は amd64 です。
+Test は PR の opened/synchronize/reopened（開いた PR への push を含む）だけで実行し、main push や merge 後に重複実行しません。
 テスト runner は `ACTIONS_TEST_RUNNER`、未設定なら `ubuntu-latest` です。Actions は Node 24 を使います。
+Release は読み取り専用 cache のイベントで動くため、GHA cache の export は行いません。
+import は既存 main entry への best-effort であり、新しい供給元はないため失効後の cold build を許容します。
+PR の merge-ref cache を Release が再利用できるとは扱いません。
+
+未公開の Release のタグだけが残った場合も、そのタグは採番の履歴として保持します。
+たとえば v0.1.0 の次の patch は v0.1.1 です。
+承認済み image は到達可能な公開済み stable Release から引き継ぎます。
+Release の明示的な 404（または draft/prerelease）だけを飛ばし、該当する公開済み Release がなければ空集合から始めます。
+公開済み Release の manifest 欠落、破損、認証や通信の失敗は無視せず停止します。
+他の image の有効な pin は保持します。
+古い失敗 run の再実行には修正が反映されません。タグの削除や書き換えは行わず、修正 PR の merge 後の新しい run で公開します。
 feature PR のマージ後に、個別 commit メッセージから semver と release notes を作成します。
 今回の PR で merge・公開・deploy は実施しません。受け入れ根拠と未検証範囲は `docs/acceptance.md` を参照してください。
