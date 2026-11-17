@@ -49,6 +49,23 @@ before completion. A PR does not execute merged-PR release publication. Operator
 must verify their provider's protection-state responses and scoped IAM policy;
 unknown capability is unsupported for apply, not an implied successful integration.
 
+### Issue #3 workflow follow-up
+
+| Criterion | Evidence |
+|---|---|
+| A1 | YAML-parsed event regression: opened/synchronize/reopened only; runner fallback and existing checks retained |
+| A2 | All three release image build paths import cache without exporting it; PR builds retain read/write GHA caching; Node24/trixie/auth/multi-arch contracts retained |
+| A3 | Release-helper tests cover actual orphan-tag recovery, reachable-tag ordering, older published predecessor, other image pin preservation, 404 versus API/network failures, missing/corrupt assets and unchanged tag-based semver allocation |
+| A4 | Focused release/workflow unit tests, Python syntax, actionlint; non-pushing amd64/arm64 OCI export. Exact-head Test CI and review URLs are recorded on the follow-up PR |
+| A5 | README documents PR-only tests, best-effort read-only release cache/cold builds and unpublished-tag recovery; issue and PR review evidence remain on GitHub |
+
+The [original Release attempt](https://github.com/michibiki-io/raft-snapshot-retainer/actions/runs/44123571741)
+failed while exporting GHA cache after the build/push stage. Its `v0.1.0` tag
+exists without a published GitHub Release. Follow-up validation does not rewrite
+that tag, replay the old workflow, or publish images/Releases. Corrected post-merge
+publication remains unrun until the human merges the reviewed fix. PR cache hits
+are not evidence that the read-only Release event can write cache.
+
 ## 日本語
 
 R1〜R13 と実装、検証の対応は上表のとおりです。
@@ -62,3 +79,12 @@ MinIO のレジストリ取得失敗を受け、上流 Release の checksum 固�
 実 provider、arm64 の native 実行、release/GHCR 公開、実 snapshot の OpenBao 復元は未実施です。
 本番 snapshot の削除、cluster への deploy、隣接 consumer の変更は行っていません。
 マージ後の公開 workflow は PR 検証とは別であり、公開済みとは報告しません。
+
+### Issue #3 の workflow 修正
+
+Test を PR イベントだけに限定し、Release の全ビルド経路から GHA cache export を除きました。
+import は best-effort とし、main cache の新しい供給元がないため cold build を許容します。
+未公開タグを採番履歴として維持し、image pin は公開済み stable Release から引き継ぎます。
+404 だけの未公開タグと、公開済み Release の asset 欠落や通信失敗を区別するテストを追加しました。
+検証コマンドと未実施の公開範囲は上表および follow-up PR に記録します。
+古い失敗 run の履歴を成功したとは扱わず、タグの削除、書き換え、手動公開は行いません。
