@@ -1,0 +1,342 @@
+name: Release
+
+on:
+  pull_request_target:
+    types:
+      - closed
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: read
+
+concurrency:
+  group: release-${{ github.repository }}-main
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ${{ vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
+    if: >-
+      ${{ github.event.pull_request.merged == true
+      && github.event.pull_request.base.ref == 'main'
+      && startsWith(github.event.pull_request.head.ref, 'feature/') }}
+    outputs:
+      release_required: ${{ steps.compute.outputs.release_required }}
+      release_kind: ${{ steps.compute.outputs.release_kind }}
+      previous_tag: ${{ steps.compute.outputs.previous_tag }}
+      git_tag: ${{ steps.compute.outputs.git_tag }}
+      docker_tag: ${{ steps.compute.outputs.docker_tag }}
+      tag_exists: ${{ steps.compute.outputs.tag_exists }}
+      image: ${{ steps.image.outputs.image }}
+    env:
+      RELEASE_BRANCH: main
+      IMAGE_REGISTRY: ghcr.io
+    steps:
+      - name: Check out merge commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --force --tags origin
+
+      - name: Fetch PR head for git fallback
+        continue-on-error: true
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --force origin "refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}" || true
+          git fetch --force origin "refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pull/${PR_NUMBER}/head"
+
+      - name: Compute release metadata
+        id: compute
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_COMMIT_COUNT: ${{ github.event.pull_request.commits }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}  # diagnostics only; release classification ignores PR titles
+        run: python3 scripts/release/compute_release.py
+
+      - name: Skip when no release is required
+        if: steps.compute.outputs.release_required != 'true'
+        run: echo "No releasable commit messages were found for this merged pull request."
+      - name: Set up Go
+        if: steps.compute.outputs.release_required == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Run Go tests
+        if: steps.compute.outputs.release_required == 'true'
+        run: go test ./...
+      - name: Build release binaries
+        if: steps.compute.outputs.release_required == 'true'
+        env:
+          VERSION: ${{ steps.compute.outputs.git_tag }}
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o dist/raft-snapshot-retainer ./cmd/raft-snapshot-retainer
+            tar -czf "dist/raft-snapshot-retainer_${VERSION}_linux_${arch}.tar.gz" -C dist raft-snapshot-retainer
+          done
+          rm dist/raft-snapshot-retainer
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+      - name: Upload release binaries
+        if: steps.compute.outputs.release_required == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-binaries
+          path: dist/
+      - name: Create annotated git tag
+        if: steps.compute.outputs.release_required == 'true' && steps.compute.outputs.tag_exists != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.compute.outputs.git_tag }}" -m "Release ${{ steps.compute.outputs.git_tag }}"
+          git push origin "${{ steps.compute.outputs.git_tag }}"
+      - name: Normalize image name
+        if: steps.compute.outputs.release_required == 'true'
+        id: image
+        shell: bash
+        run: |
+          lower_repository="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${IMAGE_REGISTRY}/${lower_repository}" >> "${GITHUB_OUTPUT}"
+
+  docker-amd64:
+    name: Publish Docker amd64
+    needs: prepare
+    runs-on: ${{ vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
+    if: needs.prepare.outputs.release_required == 'true'
+    outputs:
+      digest: ${{ steps.build_amd64.outputs.digest }}
+    env:
+      IMAGE_REGISTRY: ghcr.io
+    steps:
+      - name: Check out merge commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Set up QEMU for fallback multi-arch build
+        if: vars.ACTIONS_RUNNER_ARM64 == ''
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ env.IMAGE_REGISTRY == 'ghcr.io' && github.actor || secrets.REGISTRY_USERNAME }}
+          password: ${{ env.IMAGE_REGISTRY == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.REGISTRY_PASSWORD }}
+
+      - name: Derive Docker metadata
+        id: docker_meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ needs.prepare.outputs.image }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.docker_tag }}
+
+      - name: Build and push multi-arch Docker image with QEMU
+        if: vars.ACTIONS_RUNNER_ARM64 == ''
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          annotations: ${{ steps.docker_meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.git_tag }}
+            BUILD_COMMIT=${{ github.event.pull_request.merge_commit_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Build and push amd64 digest image
+        id: build_amd64
+        if: vars.ACTIONS_RUNNER_ARM64 != ''
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          annotations: ${{ steps.docker_meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.git_tag }}
+            BUILD_COMMIT=${{ github.event.pull_request.merge_commit_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+  docker-arm64:
+    name: Publish Docker arm64
+    needs: prepare
+    runs-on: ${{ vars.ACTIONS_RUNNER_ARM64 || vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
+    if: needs.prepare.outputs.release_required == 'true' && vars.ACTIONS_RUNNER_ARM64 != ''
+    outputs:
+      digest: ${{ steps.build_arm64.outputs.digest }}
+    env:
+      IMAGE_REGISTRY: ghcr.io
+    steps:
+      - name: Check out merge commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ env.IMAGE_REGISTRY == 'ghcr.io' && github.actor || secrets.REGISTRY_USERNAME }}
+          password: ${{ env.IMAGE_REGISTRY == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.REGISTRY_PASSWORD }}
+
+      - name: Derive Docker metadata
+        id: docker_meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ needs.prepare.outputs.image }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.docker_tag }}
+
+      - name: Build and push arm64 digest image
+        id: build_arm64
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/arm64
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          annotations: ${{ steps.docker_meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.git_tag }}
+            BUILD_COMMIT=${{ github.event.pull_request.merge_commit_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+  docker-manifest:
+    name: Publish Docker manifest
+    needs:
+      - prepare
+      - docker-amd64
+      - docker-arm64
+    runs-on: ${{ vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
+    if: >-
+      ${{ always()
+      && needs.prepare.outputs.release_required == 'true'
+      && vars.ACTIONS_RUNNER_ARM64 != ''
+      && needs.docker-amd64.result == 'success'
+      && needs.docker-arm64.result == 'success' }}
+    env:
+      IMAGE_REGISTRY: ghcr.io
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ env.IMAGE_REGISTRY == 'ghcr.io' && github.actor || secrets.REGISTRY_USERNAME }}
+          password: ${{ env.IMAGE_REGISTRY == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.REGISTRY_PASSWORD }}
+
+      - name: Create final multi-arch Docker tag
+        run: |
+          docker buildx imagetools create \
+            --tag "${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.docker_tag }}" \
+            "${{ needs.prepare.outputs.image }}@${{ needs.docker-amd64.outputs.digest }}" \
+            "${{ needs.prepare.outputs.image }}@${{ needs.docker-arm64.outputs.digest }}"
+
+  publish:
+    name: Publish release
+    needs:
+      - prepare
+      - docker-amd64
+      - docker-arm64
+      - docker-manifest
+    runs-on: ${{ vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
+    if: >-
+      ${{ always()
+      && needs.prepare.result == 'success'
+      && needs.prepare.outputs.release_required == 'true'
+      && needs.docker-amd64.result == 'success'
+      && (vars.ACTIONS_RUNNER_ARM64 == ''
+      || (needs.docker-arm64.result == 'success' && needs.docker-manifest.result == 'success')) }}
+    env:
+      RELEASE_BRANCH: main
+    steps:
+      - name: Check out merge commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --force --tags origin
+      - name: Generate release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          mkdir -p .github/tmp &&
+          python3 scripts/release/generate_release_notes.py
+          --repo "${GITHUB_REPOSITORY}"
+          --previous-tag "${{ needs.prepare.outputs.previous_tag }}"
+          --target "${{ github.event.pull_request.merge_commit_sha }}"
+          --pr-number "${{ github.event.pull_request.number }}"
+          --output .github/tmp/release-notes.md
+
+      - name: Download release binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: release-binaries
+          path: dist/
+      - uses: docker/setup-buildx-action@v4
+      - name: Record published image manifests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          IMAGE_TAG: ${{ needs.prepare.outputs.docker_tag }}
+          VERSION: ${{ needs.prepare.outputs.git_tag }}
+          PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+        run: python3 scripts/release/image_manifest.py
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.git_tag }}
+          target_commitish: ${{ github.event.pull_request.merge_commit_sha }}
+          body_path: .github/tmp/release-notes.md
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/release-images.json
+            dist/approved-runtime-images.json
