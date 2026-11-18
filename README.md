@@ -246,9 +246,11 @@ your Python interpreter, so activate the venv first or use its Python explicitly
 
 The `Test` workflow runs only on pull-request opened/synchronize/reopened events,
 including pushes to an open PR. It does not run again on main pushes or merges.
-It verifies formatting/vet/unit/race, amd64/arm64 cross-builds,
-release helpers and amd64 MinIO/container integration. `ACTIONS_TEST_RUNNER` selects
-an **amd64 Linux** runner with Docker/Compose; unset falls back to `ubuntu-latest`.
+It builds the container on native Linux amd64 and arm64 runners. Each job checks
+the executable's ELF architecture and runs the image entrypoint with `--version`.
+The amd64 job also runs formatting/vet/unit/race, release helper tests and the MinIO
+integration. `ACTIONS_TEST_RUNNER` selects the amd64 Linux runner with Docker/Compose
+and defaults to `ubuntu-latest`. The arm64 job uses `ubuntu-24.04-arm`.
 All JavaScript Actions use Node 24 runtimes. No Node application/plugin is added.
 
 The `Release` workflow runs after merged `feature/*` PRs targeting `main`, computes
@@ -256,13 +258,17 @@ semver from individual Conventional Commit messages (never PR titles), initially
 `v0.1.0`, and publishes GitHub Release tarballs/checksums plus
 `ghcr.io/michibiki-io/raft-snapshot-retainer:0.1.0` (image tags omit `v`). It uses
 `GITHUB_TOKEN` for GitHub/GHCR, with repository Actions package-write permission.
-`ACTIONS_RUNNER` defaults to `ubuntu-latest`; absent `ACTIONS_RUNNER_ARM64` uses QEMU
-for both platforms, otherwise native amd64/arm64 jobs create a shared manifest.
+`ACTIONS_RUNNER` defaults to `ubuntu-latest` and `ACTIONS_RUNNER_ARM64` defaults to
+`ubuntu-24.04-arm`. Each native job builds and checks its release archive and
+pushes its image by digest. Both jobs must extract and check the ELF of the
+registry image's platform child and run its entrypoint on the native runner
+before the final multi-platform tag is created. The manifest uses the verified
+image indexes so their provenance and SBOM attestations are retained.
 Release assets `release-images.json` and `approved-runtime-images.json` record the
 published digest and carry forward prior approved pins without repository commits.
 Release builds retain best-effort `cache-from: type=gha` but never export GHA
 cache: the post-merge `pull_request_target` event has read-only cache access.
-PR validation still imports/exports its own cache. With main-push tests removed,
+PR validation imports/exports a separate cache for each architecture. With main-push tests removed,
 no workflow supplies new main-scope entries; existing entries may expire and
 Release must tolerate cold builds. PR merge-ref caches are not shared with
 Release. This follows [Docker's cache-write guidance](https://docs.docker.com/build/ci/github-actions/cache/#cache-write-restrictions), without broader permissions or ignored export errors.
@@ -349,12 +355,15 @@ KMS 操作、snapshot 作成・復元、OpenBao/ESO 初期化、SOPS/age 管理�
 
 上記の再現コマンドで format/vet/unit/race、コンテナ、MinIO 結合テストを検証できます。
 Go 1.27.4 と依存を固定し、build/runtime とも trixie、UID/GID 65532 で実行します。
-Linux amd64/arm64 のバイナリ・image をリリース対象とし、PR の実行検証は amd64 です。
+PR は Linux amd64 と arm64 のネイティブ runner でイメージをビルドし、実行ファイルの ELF と `--version` の出力を確認します。
+MinIO 結合テストは amd64 で実行します。
 Test は PR の opened/synchronize/reopened（開いた PR への push を含む）だけで実行し、main push や merge 後に重複実行しません。
-テスト runner は `ACTIONS_TEST_RUNNER`、未設定なら `ubuntu-latest` です。Actions は Node 24 を使います。
+amd64 のテスト runner は `ACTIONS_TEST_RUNNER` で指定し、未設定なら `ubuntu-latest` です。arm64 は `ubuntu-24.04-arm` を使います。
+Release の runner は `ACTIONS_RUNNER` と `ACTIONS_RUNNER_ARM64` で指定し、既定値はそれぞれ `ubuntu-latest` と `ubuntu-24.04-arm` です。
+両 runner で配布アーカイブを作成し、push 済みの各イメージを digest で取得します。ELF とネイティブ実行でのバージョンを検証してから、attestation を含むマルチプラットフォームタグを作成します。
 Release は読み取り専用 cache のイベントで動くため、GHA cache の export は行いません。
 import は既存 main entry への best-effort であり、新しい供給元はないため失効後の cold build を許容します。
-PR の merge-ref cache を Release が再利用できるとは扱いません。
+PR の GHA cache はアーキテクチャ別の scope を使い、Release とは共有しません。
 
 未公開の Release のタグだけが残った場合も、そのタグは採番の履歴として保持します。
 たとえば v0.1.0 の次の patch は v0.1.1 です。

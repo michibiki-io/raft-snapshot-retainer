@@ -9,43 +9,66 @@ concurrency:
   cancel-in-progress: true
 jobs:
   test:
-    runs-on: ${{ vars.ACTIONS_TEST_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            machine: x86_64
+            runner: ${{ vars.ACTIONS_TEST_RUNNER || 'ubuntu-latest' }}
+          - arch: arm64
+            machine: aarch64
+            runner: ubuntu-24.04-arm
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - name: Verify native Linux runner and Docker daemon
+        env:
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          uname -sm
+          test "$(uname -sm)" = "Linux $MACHINE"
+          test "$(docker info --format '{{.OSType}} {{.Architecture}}')" = "linux $MACHINE"
       - uses: actions/setup-go@v7
+        if: matrix.arch == 'amd64'
         with:
           go-version-file: go.mod
           check-latest: true
       - name: Format, vet, unit and race
+        if: matrix.arch == 'amd64'
         run: make check test
-      - name: Cross-compile release binaries
-        run: |
-          for arch in amd64 arm64; do
-            GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath -o /tmp/retainer-$arch ./cmd/raft-snapshot-retainer
-          done
       - name: Install integration test dependencies
+        if: matrix.arch == 'amd64'
         run: |
           python3 -m venv .tmp/e2e-venv
           .tmp/e2e-venv/bin/pip install -r test/e2e/requirements.txt
       - name: Validate release helpers and harness
+        if: matrix.arch == 'amd64'
         run: |
           python3 -m py_compile scripts/release/*.py test/e2e/scripts/*.py test/e2e/pytest/*.py
           .tmp/e2e-venv/bin/python -m unittest discover -s scripts/release -p 'test_*.py'
       - uses: docker/setup-buildx-action@v4
-      - name: Validate amd64 container with GHA build cache
+      - name: Build native container with GHA build cache
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: ./Dockerfile
           load: true
+          push: false
           tags: raft-snapshot-retainer:e2e
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/${{ matrix.arch }}
+          cache-from: type=gha,scope=raft-snapshot-retainer-${{ matrix.arch }}
+          cache-to: type=gha,scope=raft-snapshot-retainer-${{ matrix.arch }},mode=max
+      - name: Verify container ELF and entrypoint
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: bash scripts/release/verify_image.sh "$ARCH" raft-snapshot-retainer:e2e dev
       - name: MinIO CLI integration
+        if: matrix.arch == 'amd64'
         run: .tmp/e2e-venv/bin/python test/e2e/scripts/run.py
       - uses: actions/upload-artifact@v7
-        if: failure()
+        if: failure() && matrix.arch == 'amd64'
         with:
           name: e2e-results
           path: test/e2e/results/
