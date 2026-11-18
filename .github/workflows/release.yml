@@ -69,41 +69,6 @@ jobs:
       - name: Skip when no release is required
         if: steps.compute.outputs.release_required != 'true'
         run: echo "No releasable commit messages were found for this merged pull request."
-      - name: Set up Go
-        if: steps.compute.outputs.release_required == 'true'
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          check-latest: true
-
-      - name: Run Go tests
-        if: steps.compute.outputs.release_required == 'true'
-        run: go test ./...
-      - name: Build release binaries
-        if: steps.compute.outputs.release_required == 'true'
-        env:
-          VERSION: ${{ steps.compute.outputs.git_tag }}
-        run: |
-          mkdir -p dist
-          for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o dist/raft-snapshot-retainer ./cmd/raft-snapshot-retainer
-            tar -czf "dist/raft-snapshot-retainer_${VERSION}_linux_${arch}.tar.gz" -C dist raft-snapshot-retainer
-          done
-          rm dist/raft-snapshot-retainer
-          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
-      - name: Upload release binaries
-        if: steps.compute.outputs.release_required == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-binaries
-          path: dist/
-      - name: Create annotated git tag
-        if: steps.compute.outputs.release_required == 'true' && steps.compute.outputs.tag_exists != 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ steps.compute.outputs.git_tag }}" -m "Release ${{ steps.compute.outputs.git_tag }}"
-          git push origin "${{ steps.compute.outputs.git_tag }}"
       - name: Normalize image name
         if: steps.compute.outputs.release_required == 'true'
         id: image
@@ -112,14 +77,25 @@ jobs:
           lower_repository="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
           echo "image=${IMAGE_REGISTRY}/${lower_repository}" >> "${GITHUB_OUTPUT}"
 
-  docker-amd64:
-    name: Publish Docker amd64
+  build:
+    name: Build and verify Linux ${{ matrix.arch }} release artifacts
     needs: prepare
-    runs-on: ${{ vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
     if: needs.prepare.outputs.release_required == 'true'
-    outputs:
-      digest: ${{ steps.build_amd64.outputs.digest }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            machine: x86_64
+            runner: ${{ vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
+          - arch: arm64
+            machine: aarch64
+            runner: ${{ vars.ACTIONS_RUNNER_ARM64 || 'ubuntu-24.04-arm' }}
     env:
+      ARCH: ${{ matrix.arch }}
+      VERSION: ${{ needs.prepare.outputs.git_tag }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
       IMAGE_REGISTRY: ghcr.io
     steps:
       - name: Check out merge commit
@@ -127,9 +103,41 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
-      - name: Set up QEMU for fallback multi-arch build
-        if: vars.ACTIONS_RUNNER_ARM64 == ''
-        uses: docker/setup-qemu-action@v4
+      - name: Verify native Linux runner and Docker daemon
+        env:
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          uname -sm
+          test "$(uname -sm)" = "Linux $MACHINE"
+          test "$(docker info --format '{{.OSType}} {{.Architecture}}')" = "linux $MACHINE"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Build and verify native release archive
+        run: |
+          GOOS=linux GOARCH="$ARCH" make build VERSION="$VERSION"
+          archive="dist/raft-snapshot-retainer_${VERSION}_linux_${ARCH}.tar.gz"
+          tar -czf "$archive" -C dist raft-snapshot-retainer
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          tar -xzf "$archive" -C "$extracted" raft-snapshot-retainer
+          python3 scripts/release/verify_elf.py "$ARCH" "$extracted/raft-snapshot-retainer"
+          actual=$("$extracted/raft-snapshot-retainer" --version)
+          test "$actual" = "$VERSION"
+
+      - name: Upload verified release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-binaries-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          overwrite: true
+          if-no-files-found: error
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -145,114 +153,89 @@ jobs:
         id: docker_meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ needs.prepare.outputs.image }}
+          images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.docker_tag }}
 
-      - name: Build and push multi-arch Docker image with QEMU
-        if: vars.ACTIONS_RUNNER_ARM64 == ''
+      - name: Build and push native Docker image by digest
+        id: image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.docker_meta.outputs.tags }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.docker_meta.outputs.labels }}
           annotations: ${{ steps.docker_meta.outputs.annotations }}
           build-args: |
-            VERSION=${{ needs.prepare.outputs.git_tag }}
+            VERSION=${{ env.VERSION }}
           # This post-merge event has read-only cache access; cold builds are valid.
           cache-from: type=gha
           provenance: true
           sbom: true
 
-      - name: Build and push amd64 digest image
-        id: build_amd64
-        if: vars.ACTIONS_RUNNER_ARM64 != ''
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          platforms: linux/amd64
-          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-          labels: ${{ steps.docker_meta.outputs.labels }}
-          annotations: ${{ steps.docker_meta.outputs.annotations }}
-          build-args: |
-            VERSION=${{ needs.prepare.outputs.git_tag }}
-          # This post-merge event has read-only cache access; cold builds are valid.
-          cache-from: type=gha
-          provenance: true
-          sbom: true
+      - name: Verify pushed image by child digest
+        shell: bash
+        env:
+          INDEX_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          child=$(docker buildx imagetools inspect --raw "$IMAGE@$INDEX_DIGEST" |
+            jq -er --arg arch "$ARCH" '
+              [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)]
+              | if length == 1 then .[0].digest else error("expected exactly one Linux " + $arch + " image") end
+              | select(test("^sha256:[a-f0-9]{64}$"))
+            ')
+          docker pull --platform "linux/$ARCH" "$IMAGE@$child"
+          bash scripts/release/verify_image.sh "$ARCH" "$IMAGE@$child" "$VERSION"
+          # Carry forward the index rather than its child to preserve attestations.
+          printf '%s\n' "$INDEX_DIGEST" > "$ARCH.digest"
 
-  docker-arm64:
-    name: Publish Docker arm64
-    needs: prepare
-    runs-on: ${{ vars.ACTIONS_RUNNER_ARM64 || vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
-    if: needs.prepare.outputs.release_required == 'true' && vars.ACTIONS_RUNNER_ARM64 != ''
-    outputs:
-      digest: ${{ steps.build_arm64.outputs.digest }}
-    env:
-      IMAGE_REGISTRY: ghcr.io
-    steps:
-      - name: Check out merge commit
-        uses: actions/checkout@v7
+      - name: Upload verified image index digest
+        uses: actions/upload-artifact@v7
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to container registry
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.IMAGE_REGISTRY }}
-          username: ${{ env.IMAGE_REGISTRY == 'ghcr.io' && github.actor || secrets.REGISTRY_USERNAME }}
-          password: ${{ env.IMAGE_REGISTRY == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.REGISTRY_PASSWORD }}
-
-      - name: Derive Docker metadata
-        id: docker_meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ needs.prepare.outputs.image }}
-          tags: |
-            type=raw,value=${{ needs.prepare.outputs.docker_tag }}
-
-      - name: Build and push arm64 digest image
-        id: build_arm64
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          platforms: linux/arm64
-          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-          labels: ${{ steps.docker_meta.outputs.labels }}
-          annotations: ${{ steps.docker_meta.outputs.annotations }}
-          build-args: |
-            VERSION=${{ needs.prepare.outputs.git_tag }}
-          # This post-merge event has read-only cache access; cold builds are valid.
-          cache-from: type=gha
-          provenance: true
-          sbom: true
+          name: image-digest-${{ matrix.arch }}
+          path: ${{ matrix.arch }}.digest
+          overwrite: true
+          if-no-files-found: error
 
   docker-manifest:
     name: Publish Docker manifest
-    needs:
-      - prepare
-      - docker-amd64
-      - docker-arm64
+    needs: [prepare, build]
     runs-on: ${{ vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
-    if: >-
-      ${{ always()
-      && needs.prepare.outputs.release_required == 'true'
-      && vars.ACTIONS_RUNNER_ARM64 != ''
-      && needs.docker-amd64.result == 'success'
-      && needs.docker-arm64.result == 'success' }}
+    if: needs.prepare.outputs.release_required == 'true'
     env:
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      IMAGE_TAG: ${{ needs.prepare.outputs.docker_tag }}
+      VERSION: ${{ needs.prepare.outputs.git_tag }}
       IMAGE_REGISTRY: ghcr.io
     steps:
+      - name: Check out merge commit for tagging
+        if: needs.prepare.outputs.tag_exists != 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Download verified image index digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: image-digest-*
+          merge-multiple: true
+          path: digests
+
+      - name: Create annotated git tag
+        if: needs.prepare.outputs.tag_exists != 'true'
+        run: |
+          git fetch --tags origin
+          if existing=$(git rev-parse --verify --quiet "refs/tags/$VERSION^{commit}"); then
+            test "$existing" = "$(git rev-parse HEAD)"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$VERSION" -m "Release $VERSION"
+            git push origin "refs/tags/$VERSION"
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -265,26 +248,15 @@ jobs:
 
       - name: Create final multi-arch Docker tag
         run: |
-          docker buildx imagetools create \
-            --tag "${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.docker_tag }}" \
-            "${{ needs.prepare.outputs.image }}@${{ needs.docker-amd64.outputs.digest }}" \
-            "${{ needs.prepare.outputs.image }}@${{ needs.docker-arm64.outputs.digest }}"
+          amd64=$(cat digests/amd64.digest)
+          arm64=$(cat digests/arm64.digest)
+          docker buildx imagetools create --tag "$IMAGE:$IMAGE_TAG" "$IMAGE@$amd64" "$IMAGE@$arm64"
 
   publish:
     name: Publish release
-    needs:
-      - prepare
-      - docker-amd64
-      - docker-arm64
-      - docker-manifest
+    needs: [prepare, build, docker-manifest]
     runs-on: ${{ vars.ACTIONS_RUNNER || 'ubuntu-latest' }}
-    if: >-
-      ${{ always()
-      && needs.prepare.result == 'success'
-      && needs.prepare.outputs.release_required == 'true'
-      && needs.docker-amd64.result == 'success'
-      && (vars.ACTIONS_RUNNER_ARM64 == ''
-      || (needs.docker-arm64.result == 'success' && needs.docker-manifest.result == 'success')) }}
+    if: needs.prepare.outputs.release_required == 'true'
     env:
       RELEASE_BRANCH: main
       IMAGE_REGISTRY: ghcr.io
@@ -312,8 +284,16 @@ jobs:
       - name: Download release binaries
         uses: actions/download-artifact@v8
         with:
-          name: release-binaries
+          pattern: release-binaries-*
+          merge-multiple: true
           path: dist/
+      - name: Write release archive checksums
+        working-directory: dist
+        env:
+          VERSION: ${{ needs.prepare.outputs.git_tag }}
+        run: |
+          sha256sum "raft-snapshot-retainer_${VERSION}_linux_amd64.tar.gz" \
+            "raft-snapshot-retainer_${VERSION}_linux_arm64.tar.gz" > SHA256SUMS
       - uses: docker/setup-buildx-action@v4
       - name: Authenticate manifest inspection
         uses: docker/login-action@v4
