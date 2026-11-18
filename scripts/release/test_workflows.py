@@ -94,9 +94,14 @@ class WorkflowTests(unittest.TestCase):
         verify = steps[steps.index(build) + 1]
         self.assertIn('docker buildx imagetools inspect --raw "$IMAGE@$INDEX_DIGEST"', verify["run"])
         self.assertIn('verify_image.sh "$ARCH" "$IMAGE@$child" "$VERSION"', verify["run"])
-        self.assertEqual(steps[steps.index(verify) + 1]["with"]["name"], "image-digest-${{ matrix.arch }}")
+        digest_upload = steps[steps.index(verify) + 1]["with"]
+        self.assertEqual(digest_upload["name"], "image-digest-${{ matrix.arch }}")
+        self.assertEqual(digest_upload["overwrite"], "true")
         archive = next(step for step in steps if step.get("name") == "Build and verify native release archive")
         self.assertIn('tar -xzf "$archive"', archive["run"])
         self.assertIn('verify_elf.py "$ARCH" "$extracted/raft-snapshot-retainer"', archive["run"])
+        archive_upload = steps[steps.index(archive) + 1]["with"]
+        self.assertEqual(archive_upload["name"], "release-binaries-${{ matrix.arch }}")
+        self.assertEqual(archive_upload["overwrite"], "true")
         self.assertIn("build", jobs["docker-manifest"]["needs"])
         self.assertIn("docker-manifest", jobs["publish"]["needs"])

@@ -136,6 +136,7 @@ jobs:
         with:
           name: release-binaries-${{ matrix.arch }}
           path: dist/*.tar.gz
+          overwrite: true
           if-no-files-found: error
 
       - name: Set up Docker Buildx
@@ -195,6 +196,7 @@ jobs:
         with:
           name: image-digest-${{ matrix.arch }}
           path: ${{ matrix.arch }}.digest
+          overwrite: true
           if-no-files-found: error
 
   docker-manifest:
